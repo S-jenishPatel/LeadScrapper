@@ -1,0 +1,11 @@
+[project]
+name = "satyam-scrapper"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "beautifulsoup4>=4.14.3",
+    "pandas>=3.0.1",
+    "playwright>=1.58.0",
+]
