@@ -1,54 +1,59 @@
-from typing import Dict, Any
-
-from playwright.async_api import async_playwright, ViewportSize
 import asyncio
 import aiohttp
 from bs4 import BeautifulSoup
 import pandas as pd
 import json
+import urllib.parse
+from typing import Dict, Any
+from playwright.async_api import async_playwright, ViewportSize
 
 MAX_ITEMS = 10
 
 # Define the social media domains we care about
 TARGET_SOCIAL_DOMAINS = ['facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com']
 
+
 async def scrape_directory(query):
     results = []
 
     async with async_playwright() as p:
-        # Launching with headless=False so you can visually debug the scrolling
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
-            viewport=ViewportSize(width= 1280, height= 800),
+            viewport=ViewportSize(width=1280, height=800),
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         page = await context.new_page()
 
         print(f"Starting search for: {query}")
-        # Format the query for the URL
-        url_query = query.replace(' ', '+')
+
+        # CRITICAL FIX 1: The actual, correct Google Maps URL
+        import urllib.parse
+        url_query = urllib.parse.quote_plus(query)
         await page.goto(f"https://www.google.com/maps/search/{url_query}")
 
-        # Wait for the results feed to load
-        # Google Maps heavily obfuscates classes, so we rely on ARIA roles where possible
         try:
-            await page.wait_for_selector('div[role="feed"]', timeout=10000)
+            # Handle the EU/Region cookie consent popup if it appears
+            consent_button = page.locator('button:has-text("Reject all"), button:has-text("Accept all")')
+            if await consent_button.count() > 0:
+                await consent_button.first.click()
+                await page.wait_for_timeout(1000)
+
+            await page.wait_for_selector('div[role="feed"]', timeout=15000)
         except Exception:
-            print("Failed to find the results feed. The page structure might have changed or loaded too slowly.")
+            print("Failed to find the results feed. Check if the query yielded results or if blocked.")
             await browser.close()
             return results
 
         print("Scrolling through results...")
 
-        # --- The Infinite Scroll Logic ---
-        # We need to target the scrollable div and push it down until the end marker appears
         previously_counted = 0
+        scroll_retries = 0
+        max_scroll_retries = 3
+
         while True:
-            # Count current loaded listings
             cards = await page.locator('div[role="feed"] > div > div > a').all()
             currently_counted = len(cards)
 
-            # Scroll the feed element
             await page.evaluate("""
                 const feed = document.querySelector('div[role="feed"]');
                 if (feed) {
@@ -56,64 +61,99 @@ async def scrape_directory(query):
                 }
             """)
 
-            # Allow time for network requests to fetch new results
-            await asyncio.sleep(2)
+            await asyncio.sleep(2.5)
 
-            # Check if we've hit the "You've reached the end of the list" text
-            # This text changes by region/language, so looking for the specific DOM node is safer,
-            # but for simplicity, we break if no new items loaded after a few tries.
             if currently_counted == previously_counted:
-                print("No new items loaded. Reached the end of the feed.")
-                break
+                scroll_retries += 1
+                if scroll_retries >= max_scroll_retries:
+                    print("Reached the end of the feed or no more items loading.")
+                    break
+            else:
+                scroll_retries = 0
 
             previously_counted = currently_counted
 
-        # --- The Extraction Logic ---
         print("Extracting business data...")
-        # Get all the clickable business cards in the feed
         listings = await page.locator('div[role="feed"] > div > div > a').all()
 
         count = 1
         for index, listing in enumerate(listings):
-            try:
-                if count > MAX_ITEMS:
-                    break
+            if count > MAX_ITEMS:
+                break
 
-                # 1. Get the Business Name
+            try:
                 name = await listing.get_attribute('aria-label')
                 if not name:
                     continue
 
                 print(f"Processing Item {count}: {name}")
-                await listing.click()
 
-                # 2. State Verification: Wait for the panel's H1 title to update to this business name
-                # We use a try/except because sometimes names have weird characters that break selectors
+                await listing.scroll_into_view_if_needed()
+                await page.wait_for_timeout(500)
+
+                # Using JS evaluate to click prevents "element intercepted" errors in Maps
+                await listing.evaluate("node => node.click()")
+
+                # CRITICAL FIX 2: Check ALL H1 tags to bypass the "Results" header trap
                 try:
-                    # Escape quotes in the name to prevent CSS selector syntax errors
-                    safe_name = name.replace('"', '\\"')
-                    await page.wait_for_selector(f'h1:has-text("{safe_name}"):visible', timeout=4000)
-                except Exception:
-                    # Fallback if the H1 wait fails
+                    # Give the panel a moment to slide in
                     await page.wait_for_timeout(2500)
 
-                # 3. Use :visible to ensure we only grab data from the currently open panel
-                website_element = page.locator('a[data-item-id="authority"]:visible').last
-                website = await website_element.get_attribute('href') if await website_element.count() > 0 else None
+                    h1_texts = await page.locator('h1:visible').all_inner_texts()
 
-                phone_element = page.locator(
-                    'button[data-tooltip="Copy phone number"]:visible div.fontBodyMedium').last
-                phone = await phone_element.inner_text() if await phone_element.count() > 0 else None
+                    match_found = False
+                    for text in h1_texts:
+                        clean_text = text.strip().lower()
+                        clean_name = name.strip().lower()
+                        # Check if the first 10 characters match (to account for minor differences)
+                        if clean_name[:10] in clean_text or clean_text[:10] in clean_name:
+                            match_found = True
+                            break
 
-                address_element = page.locator(
-                    'button[data-tooltip="Copy address"]:visible div.fontBodyMedium').last
-                address = await address_element.inner_text() if await address_element.count() > 0 else None
+                    if not match_found:
+                        print(f"  [!] Panel mismatch for '{name}'. Screen showed H1s: {h1_texts}. Skipping.")
+                        continue
+
+                except Exception as e:
+                    print(f"  [!] Failed to load side-panel for '{name}': {e}")
+                    continue
+
+                # Ensure variables are reset for this loop iteration
+                website = None
+                phone = None
+                address = None
+                maps_link = page.url
+
+                # 1. Extract Website
+                try:
+                    web_loc = page.locator('a[data-item-id="authority"]:visible')
+                    await web_loc.wait_for(state='visible', timeout=1500)
+                    website = await web_loc.first.get_attribute('href')
+                except Exception:
+                    pass
+
+                # 2. Extract Phone
+                try:
+                    phone_loc = page.locator('button[data-tooltip*="phone"]:visible div.fontBodyMedium')
+                    await phone_loc.wait_for(state='visible', timeout=1500)
+                    phone = await phone_loc.first.inner_text()
+                except Exception:
+                    pass
+
+                # 3. Extract Address
+                try:
+                    addr_loc = page.locator('button[data-tooltip*="address"]:visible div.fontBodyMedium')
+                    await addr_loc.wait_for(state='visible', timeout=1500)
+                    address = await addr_loc.first.inner_text()
+                except Exception:
+                    pass
 
                 business_data = {
                     "name": name,
                     "address": address,
                     "phone": phone,
-                    "website": website
+                    "website": website,
+                    "maps_link": maps_link
                 }
 
                 results.append(business_data)
@@ -127,23 +167,16 @@ async def scrape_directory(query):
         return results
 
 async def fetch_social_links(session, url):
-    """Fetches a single URL and extracts social media links."""
     if not url:
-        return {}
+        return {domain.split('.')[0]: None for domain in TARGET_SOCIAL_DOMAINS}
 
-    # Standardize URL (add http if missing to prevent connection errors)
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
 
-    social_links:Dict[str,Any] = {domain.split('.')[0]: None for domain in TARGET_SOCIAL_DOMAINS}
-
-    # We use a standard browser User-Agent so small business firewalls don't block us
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    social_links: Dict[str, Any] = {domain.split('.')[0]: None for domain in TARGET_SOCIAL_DOMAINS}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
     try:
-        # 10-second timeout. If a local business site takes longer, it's likely dead.
         async with session.get(url, headers=headers, timeout=10, ssl=False) as response:
             if response.status != 200:
                 return social_links
@@ -151,48 +184,32 @@ async def fetch_social_links(session, url):
             html = await response.text()
             soup = BeautifulSoup(html, 'html.parser')
 
-            # Find all anchor tags with href attributes
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href']
-
-                # Check if the href contains any of our target domains
                 for domain in TARGET_SOCIAL_DOMAINS:
                     if domain in href:
-                        # Basic cleanup: Ignore generic share links
                         if 'sharer' not in href and 'tweet?' not in href:
                             social_links[domain.split('.')[0]] = href
 
             return social_links
-
-    except Exception as e:
-        # We silently catch exceptions (timeouts, DNS errors) to keep the pipeline moving
-        print(f"  [!] Could not fetch {url}: {type(e).__name__}")
+    except Exception:
         return social_links
 
-async def enrich_business_data(business_data_list):
-    """Processes the list of businesses and adds social links to each."""
-    print("\nStarting Phase 2: Hunting for social media profiles...")
 
-    # We use a TCPConnector to limit concurrent connections and avoid crashing our local network
+async def enrich_business_data(business_data_list):
+    print("\nStarting Phase 2: Hunting for social media profiles...")
     connector = aiohttp.TCPConnector(limit=20)
     async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = []
-        for business in business_data_list:
-            # Create a task for each website
-            task = fetch_social_links(session, business.get('website'))
-            tasks.append(task)
-
-        # Run all tasks concurrently
+        tasks = [fetch_social_links(session, biz.get('website')) for biz in business_data_list]
         results = await asyncio.gather(*tasks)
 
-        # Merge the results back into the original data
         for i, business in enumerate(business_data_list):
             business['social_profiles'] = results[i]
 
     return business_data_list
 
-def export_to_json(data, filename="tiles_distributors.json"):
-    """Saves the raw, nested list of dictionaries directly to a JSON file."""
+
+def export_to_json(data, filename="output.json"):
     print(f"\nExporting to {filename}...")
     try:
         with open(filename, 'w', encoding='utf-8') as f:
@@ -201,8 +218,8 @@ def export_to_json(data, filename="tiles_distributors.json"):
     except Exception as e:
         print(f"Error saving JSON: {e}")
 
-def export_to_csv(data, filename="tiles_distributors.csv"):
-    """Flattens the nested data and exports it to a clean CSV file."""
+
+def export_to_csv(data, filename="output.csv"):
     print(f"Exporting to {filename}...")
     try:
         if not data:
@@ -211,14 +228,10 @@ def export_to_csv(data, filename="tiles_distributors.csv"):
 
         df = pd.DataFrame(data)
 
-        # We must flatten the 'social_profiles' dictionary into separate columns.
-        # We use a lambda to ensure that even if a row has no social profiles (None),
-        # it doesn't crash the Pandas Series conversion.
         if 'social_profiles' in df.columns:
             social_df = df['social_profiles'].apply(
                 lambda x: pd.Series(x) if isinstance(x, dict) else pd.Series()
             )
-            # Combine the original dataframe (minus the nested column) with the new flat columns
             df = pd.concat([df.drop(['social_profiles'], axis=1), social_df], axis=1)
 
         df.to_csv(filename, index=False, encoding='utf-8')
@@ -226,31 +239,26 @@ def export_to_csv(data, filename="tiles_distributors.csv"):
     except Exception as e:
         print(f"Error saving CSV: {e}")
 
+
 async def main():
     target_query = "Tiles distributors in london"
 
-    # 1. Phase 1: The Directory Crawler (Playwright)
     print("--- Phase 1: Directory Scraping ---")
     raw_business_data = await scrape_directory(target_query)
 
-    # Check if Phase 1 found anything before proceeding
     if not raw_business_data:
         print("No businesses found or scraper failed. Exiting.")
         return
 
-    # 2. Phase 2: The Social Media Hunter (aiohttp + BeautifulSoup)
     print("\n--- Phase 2: Social Media Enrichment ---")
     enriched_data = await enrich_business_data(raw_business_data)
 
-    # 3. Phase 3: Direct File Export
     print("\n--- Phase 3: File Export ---")
-    # Save a JSON backup just in case the CSV flattening drops anything weird
     export_to_json(enriched_data, filename="output.json")
-
-    # Save the final, analytical CSV
     export_to_csv(enriched_data, filename="output.csv")
 
     print("\nScraping pipeline finished successfully.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
