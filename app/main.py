@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import json
 
+MAX_ITEMS = 10
 
 # Define the social media domains we care about
 TARGET_SOCIAL_DOMAINS = ['facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com']
@@ -72,29 +73,40 @@ async def scrape_directory(query):
         # Get all the clickable business cards in the feed
         listings = await page.locator('div[role="feed"] > div > div > a').all()
 
+        count = 1
         for index, listing in enumerate(listings):
             try:
-                # 1. Get the Business Name from the aria-label
+                if count > MAX_ITEMS:
+                    break
+
+                # 1. Get the Business Name
                 name = await listing.get_attribute('aria-label')
+                if not name:
+                    continue
 
-                # 2. To get deeper details (website, phone), we actually need to click the listing
-                # and read the side-panel that opens up.
+                print(f"Processing Item {count}: {name}")
                 await listing.click()
-                await page.wait_for_timeout(1500)  # Wait for the detail panel to animate in
 
-                # Note: These selectors are highly volatile and often change on Maps.
-                # In a production environment, you'd use more robust XPath or text-contains selectors.
+                # 2. State Verification: Wait for the panel's H1 title to update to this business name
+                # We use a try/except because sometimes names have weird characters that break selectors
+                try:
+                    # Escape quotes in the name to prevent CSS selector syntax errors
+                    safe_name = name.replace('"', '\\"')
+                    await page.wait_for_selector(f'h1:has-text("{safe_name}"):visible', timeout=4000)
+                except Exception:
+                    # Fallback if the H1 wait fails
+                    await page.wait_for_timeout(2500)
 
-                # Extract URL (Looking for the globe icon or 'Website' text)
-                website_element = page.locator('a[data-item-id="authority"]')
+                # 3. Use :visible to ensure we only grab data from the currently open panel
+                website_element = page.locator('a[data-item-id="authority"]:visible').last
                 website = await website_element.get_attribute('href') if await website_element.count() > 0 else None
 
-                # Extract Phone Number (Looking for 'Phone' icon or text pattern)
-                phone_element = page.locator('button[data-tooltip="Copy phone number"] div.fontBodyMedium')
+                phone_element = page.locator(
+                    'button[data-tooltip="Copy phone number"]:visible div.fontBodyMedium').last
                 phone = await phone_element.inner_text() if await phone_element.count() > 0 else None
 
-                # Extract Address
-                address_element = page.locator('button[data-tooltip="Copy address"] div.fontBodyMedium')
+                address_element = page.locator(
+                    'button[data-tooltip="Copy address"]:visible div.fontBodyMedium').last
                 address = await address_element.inner_text() if await address_element.count() > 0 else None
 
                 business_data = {
@@ -104,11 +116,11 @@ async def scrape_directory(query):
                     "website": website
                 }
 
-                print(f"Extracted: {name}")
                 results.append(business_data)
+                count += 1
 
             except Exception as e:
-                print(f"Error extracting item {index}: {e}")
+                print(f"Error extracting item {index} ({name}): {e}")
                 continue
 
         await browser.close()
@@ -215,7 +227,7 @@ def export_to_csv(data, filename="tiles_distributors.csv"):
         print(f"Error saving CSV: {e}")
 
 async def main():
-    target_query = "Tiles distributors in Rajkot"
+    target_query = "Tiles distributors in london"
 
     # 1. Phase 1: The Directory Crawler (Playwright)
     print("--- Phase 1: Directory Scraping ---")
