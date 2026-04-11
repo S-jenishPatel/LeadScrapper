@@ -87,24 +87,26 @@ async def scrape_directory(query):
                 print(f"Processing Item {count}: {name}")
 
                 await listing.scroll_into_view_if_needed()
-                await page.wait_for_timeout(500)  # Let the scroll settle
+                await page.wait_for_timeout(500)
 
-                # Force click the top-left corner to avoid clicking child elements like "Website" buttons
-                await listing.click(force=True, position={"x": 10, "y": 10})
+                # CRITICAL FIX: Use JavaScript click immediately to bypass invisible Google overlays
+                await listing.evaluate("node => node.click()")
 
-                # --- CRITICAL FIX: Smart Polling Loop ---
                 match_found = False
                 clean_name = name.strip().lower()
 
-                # Poll every 500ms for up to 6 seconds (12 attempts)
-                for attempt in range(12):
+                # Poll every 500ms for up to 8 seconds (16 attempts)
+                for attempt in range(16):
                     await page.wait_for_timeout(500)
                     h1_texts = await page.locator('h1:visible').all_inner_texts()
 
                     for text in h1_texts:
                         clean_text = text.strip().lower()
                         # Fuzzy match: check if the first 10 chars match
-                        if clean_name[:10] in clean_text or clean_text[:10] in clean_name:
+                        if len(clean_name) > 5 and (clean_name[:10] in clean_text or clean_text[:10] in clean_name):
+                            match_found = True
+                            break
+                        elif clean_name == clean_text:
                             match_found = True
                             break
 
@@ -114,9 +116,7 @@ async def scrape_directory(query):
                         break
 
                 if not match_found:
-                    print(f"  [!] Panel mismatch for '{name}'. Screen showed H1s: {h1_texts}. Skipping.")
-                    # If the click completely failed, sometimes clicking via JS evaluate rescues it for the NEXT loop
-                    await listing.evaluate("node => node.click()")
+                    print(f"  [!] Panel took too long to load for '{name}'. Skipping to prevent saving false data.")
                     continue
 
                 # Ensure variables are reset for this loop iteration
@@ -166,7 +166,6 @@ async def scrape_directory(query):
 
         await browser.close()
         return results
-
 
 async def fetch_social_links(session, url):
     if not url:
