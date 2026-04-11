@@ -26,13 +26,11 @@ async def scrape_directory(query):
 
         print(f"Starting search for: {query}")
 
-        # CRITICAL FIX 1: The actual, correct Google Maps URL
         import urllib.parse
         url_query = urllib.parse.quote_plus(query)
         await page.goto(f"https://www.google.com/maps/search/{url_query}")
 
         try:
-            # Handle the EU/Region cookie consent popup if it appears
             consent_button = page.locator('button:has-text("Reject all"), button:has-text("Accept all")')
             if await consent_button.count() > 0:
                 await consent_button.first.click()
@@ -89,33 +87,36 @@ async def scrape_directory(query):
                 print(f"Processing Item {count}: {name}")
 
                 await listing.scroll_into_view_if_needed()
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(500)  # Let the scroll settle
 
-                # Using JS evaluate to click prevents "element intercepted" errors in Maps
-                await listing.evaluate("node => node.click()")
+                # Force click the top-left corner to avoid clicking child elements like "Website" buttons
+                await listing.click(force=True, position={"x": 10, "y": 10})
 
-                # CRITICAL FIX 2: Check ALL H1 tags to bypass the "Results" header trap
-                try:
-                    # Give the panel a moment to slide in
-                    await page.wait_for_timeout(2500)
+                # --- CRITICAL FIX: Smart Polling Loop ---
+                match_found = False
+                clean_name = name.strip().lower()
 
+                # Poll every 500ms for up to 6 seconds (12 attempts)
+                for attempt in range(12):
+                    await page.wait_for_timeout(500)
                     h1_texts = await page.locator('h1:visible').all_inner_texts()
 
-                    match_found = False
                     for text in h1_texts:
                         clean_text = text.strip().lower()
-                        clean_name = name.strip().lower()
-                        # Check if the first 10 characters match (to account for minor differences)
+                        # Fuzzy match: check if the first 10 chars match
                         if clean_name[:10] in clean_text or clean_text[:10] in clean_name:
                             match_found = True
                             break
 
-                    if not match_found:
-                        print(f"  [!] Panel mismatch for '{name}'. Screen showed H1s: {h1_texts}. Skipping.")
-                        continue
+                    if match_found:
+                        # Give the panel an extra 1.5s to fully render the phone/website DOM nodes
+                        await page.wait_for_timeout(1500)
+                        break
 
-                except Exception as e:
-                    print(f"  [!] Failed to load side-panel for '{name}': {e}")
+                if not match_found:
+                    print(f"  [!] Panel mismatch for '{name}'. Screen showed H1s: {h1_texts}. Skipping.")
+                    # If the click completely failed, sometimes clicking via JS evaluate rescues it for the NEXT loop
+                    await listing.evaluate("node => node.click()")
                     continue
 
                 # Ensure variables are reset for this loop iteration
@@ -165,6 +166,7 @@ async def scrape_directory(query):
 
         await browser.close()
         return results
+
 
 async def fetch_social_links(session, url):
     if not url:
