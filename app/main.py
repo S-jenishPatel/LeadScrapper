@@ -3,14 +3,13 @@ import aiohttp
 from bs4 import BeautifulSoup
 import pandas as pd
 import json
-import urllib.parse
 from typing import Dict, Any
 from playwright.async_api import async_playwright, ViewportSize
 
 MAX_ITEMS = 10
 
 # Define the social media domains we care about
-TARGET_SOCIAL_DOMAINS = ['facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com']
+TARGET_SOCIAL_DOMAINS = ['gmail.com', 'facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com']
 
 
 async def scrape_directory(query):
