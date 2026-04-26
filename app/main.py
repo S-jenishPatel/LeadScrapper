@@ -24,7 +24,7 @@ async def scrape_directory(query):
         )
         page = await context.new_page()
 
-        print(f"Starting search for: {query}")
+        print(f"\nStarting search for: {query}")
 
         import urllib.parse
         url_query = urllib.parse.quote_plus(query)
@@ -38,11 +38,11 @@ async def scrape_directory(query):
 
             await page.wait_for_selector('div[role="feed"]', timeout=15000)
         except Exception:
-            print("Failed to find the results feed. Check if the query yielded results or if blocked.")
+            print("\nFailed to find the results feed. Check if the query yielded results or if blocked.")
             await browser.close()
             return results
 
-        print("Scrolling through results...")
+        print("\nScrolling through results...")
 
         previously_counted = 0
         scroll_retries = 0
@@ -64,14 +64,14 @@ async def scrape_directory(query):
             if currently_counted == previously_counted:
                 scroll_retries += 1
                 if scroll_retries >= max_scroll_retries:
-                    print("Reached the end of the feed or no more items loading.")
+                    print("\nReached the end of the feed or no more items loading.")
                     break
             else:
                 scroll_retries = 0
 
             previously_counted = currently_counted
 
-        print("Extracting business data...")
+        print("\nExtracting business data...")
         listings = await page.locator('div[role="feed"] > div > div > a').all()
 
         count = 1
@@ -84,7 +84,7 @@ async def scrape_directory(query):
                 if not name:
                     continue
 
-                print(f"Processing Item {count}: {name}")
+                print(f"\nProcessing Item {count}: {name}")
 
                 await listing.scroll_into_view_if_needed()
                 await page.wait_for_timeout(500)
@@ -161,11 +161,12 @@ async def scrape_directory(query):
                 count += 1
 
             except Exception as e:
-                print(f"Error extracting item {index} ({name}): {e}")
+                print(f"\nError extracting item {index} ({name}): {e}")
                 continue
 
         await browser.close()
         return results
+
 
 async def fetch_social_links(session, url):
     if not url:
@@ -215,16 +216,16 @@ def export_to_json(data, filename="output.json"):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
-        print("JSON export complete!")
+        print("\nJSON export complete!")
     except Exception as e:
-        print(f"Error saving JSON: {e}")
+        print(f"\nError saving JSON: {e}")
 
 
 def export_to_csv(data, filename="output.csv"):
-    print(f"Exporting to {filename}...")
+    print(f"\nExporting to {filename}...")
     try:
         if not data:
-            print("No data to export.")
+            print("\nNo data to export.")
             return
 
         df = pd.DataFrame(data)
@@ -236,19 +237,19 @@ def export_to_csv(data, filename="output.csv"):
             df = pd.concat([df.drop(['social_profiles'], axis=1), social_df], axis=1)
 
         df.to_csv(filename, index=False, encoding='utf-8')
-        print("CSV export complete!")
+        print("\nCSV export complete!")
     except Exception as e:
         print(f"Error saving CSV: {e}")
 
 
 async def main():
-    target_query = "Tiles distributors in london"
+    target_query = input("Enter query: ")
 
-    print("--- Phase 1: Directory Scraping ---")
+    print("\n--- Phase 1: Directory Scraping ---")
     raw_business_data = await scrape_directory(target_query)
 
     if not raw_business_data:
-        print("No businesses found or scraper failed. Exiting.")
+        print("\nNo businesses found or scraper failed. Exiting.")
         return
 
     print("\n--- Phase 2: Social Media Enrichment ---")
